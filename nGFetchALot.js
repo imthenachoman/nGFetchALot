@@ -158,7 +158,7 @@ function nGFetchALot({
             killSwitchTripped = true;
             isDoneProcessingQueue = true;
             onError({
-                message: "unexpected fatal error during queue processing",
+                reason: "unexpected fatal error during queue processing",
                 error
             });
         }
@@ -349,40 +349,49 @@ function nGFetchALot({
                                 else
                                 {
                                     onError({
-                                        requestType: "batch",
-                                        id: itemId,
-                                        message: "retry limit exceeded",
-                                        retryCount: batchRequest._retryCount
+                                        requestType: "batch item",
+                                        request: batchRequest,
+                                        reason: "retry limit exceeded",
+                                        errorCode: httpResponseCode,
+                                        errorMessage: httpResponseMessage,
+                                        responseJSON: responseJSON,
+                                        retrying: false,
                                     });
                                 }
                             }
                             else
                             {
                                 onError({
-                                    requestType: "batch",
-                                    id: itemId,
-                                    message: "not retryable; skipping",
+                                    requestType: "batch item",
+                                    request: batchRequest,
+                                    reason: "not retryable; skipping",
                                     errorCode: httpResponseCode,
                                     errorMessage: httpResponseMessage,
-                                    responseJSON: responseJSON
+                                    responseJSON: responseJSON,
+                                    retrying: false,
                                 });
                             }
                         }
                         else
                         {
                             onError({
-                                requestType: "batch",
-                                id: itemId,
-                                message: "not found in response",
+                                requestType: "batch item",
                                 request: batchRequest,
-                                responseParts: responseParts
-
+                                reason: "not found in response",
+                                response: responseData,
+                                retrying: false,
                             });
                         }
                     }
                 },
                 onRetryable: (details) =>
                 {
+                    onError({
+                        ...details,
+                        requestType: "batch container",
+                        request: batchRequests,
+                        retrying: true
+                    });
                     // if the batch request was retryable
                     // push all the original requests back to the queue
                     // we have to reverse to keep priorities
@@ -399,9 +408,8 @@ function nGFetchALot({
                         {
                             onError({
                                 requestType: "batch item",
-                                id: item.id,
-                                message: "retry limit exceeded",
-                                retryCount: item._retryCount,
+                                request: item,
+                                reason: "retry limit exceeded",
                                 retrying: false
                             });
                         }
@@ -411,8 +419,8 @@ function nGFetchALot({
                 {
                     onError({
                         ...details,
-                        requestType: "batch request",
-                        ids: batchRequests.map(i => i.id),
+                        requestType: "batch container",
+                        request: batchRequests,
                         retrying: true
                     });
 
@@ -432,9 +440,8 @@ function nGFetchALot({
                         {
                             onError({
                                 requestType: "batch item",
-                                id: item.id,
-                                message: "retry limit exceeded",
-                                retryCount: item._retryCount,
+                                request: item,
+                                reason: "retry limit exceeded",
                                 retrying: false
                             });
                         }
@@ -444,8 +451,8 @@ function nGFetchALot({
                 {
                     onError({
                         ...details,
-                        requestType: "batch request",
-                        ids: batchRequests.map(i => i.id),
+                        requestType: "batch container",
+                        request: batchRequests,
                         retrying: false
                     });
                 }
@@ -466,6 +473,13 @@ function nGFetchALot({
                 },
                 onRetryable: (details) =>
                 {
+                    onError({
+                        ...details,
+                        requestType: "solo",
+                        request: soloRequest,
+                        retrying: true
+                    });
+
                     // retry the request if we can
                     if(soloRequest._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
                     {
@@ -476,9 +490,8 @@ function nGFetchALot({
                     {
                         onError({
                             requestType: "solo",
-                            id: soloRequest.id,
-                            message: "retry limit exceeded",
-                            retryCount: soloRequest._retryCount,
+                            request: soloRequest,
+                            reason: "retry limit exceeded",
                             retrying: false,
                         });
                     }
@@ -488,8 +501,8 @@ function nGFetchALot({
                     onError({
                         ...details,
                         requestType: "solo",
-                        id: soloRequest.id,
-                        retrying: false
+                        request: soloRequest,
+                        retrying: true
                     });
                 },
                 onError: (details) =>
@@ -497,7 +510,7 @@ function nGFetchALot({
                     onError({
                         ...details,
                         requestType: "solo",
-                        id: soloRequest.id,
+                        request: soloRequest,
                         retrying: false
                     });
                 }
@@ -732,14 +745,12 @@ function nGFetchALot({
             // TO DO: catch transient network errors like a momentary disconnect; BUG-02 (https://gemini.google.com/app/d29994b23668ac56)
 
             console.debug({
-                message: "unknown fetch network error",
+                reason: "unknown fetch network error",
                 error: error
             })
 
             return onUnknown({
-                id: id,
-                url: url,
-                message: "unknown fetch network error",
+                reason: "unknown fetch network error",
                 error: error
             });
         }
@@ -760,8 +771,8 @@ function nGFetchALot({
                     killSwitchTripped = true; // Trip the master circuit breaker
 
                     return onError({
-                        message: `max global retries reached; terminating execution`,
-                        retryCount: consecutiveFailureCount
+                        reason: `max global retries reached; terminating execution`,
+                        fetchResponse: fetchResponse,
                     });
                 }
                 else
@@ -769,13 +780,13 @@ function nGFetchALot({
                     const rateLimitMessage = `global rate limit error; pausing until ${(new Date(globalCooldownWaitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((globalCooldownWaitUntil - Date.now()) / 1000))} seconds) (wave ${consecutiveFailureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`;
 
                     console.debug({
-                        message: rateLimitMessage,
+                        reason: rateLimitMessage,
                         globalRetryCount: consecutiveFailureCount
                     });
 
                     return onRetryable({
-                        message: rateLimitMessage,
-                        globalRetryCount: consecutiveFailureCount
+                        reason: rateLimitMessage,
+                        fetchResponse: fetchResponse
                     });
                 }
             }
@@ -784,14 +795,12 @@ function nGFetchALot({
                 console.debug({
                     id: id,
                     url: url,
-                    message: "unknown fetch google error",
+                    reason: "unknown fetch google error",
                     fetchResponse: fetchResponse
                 });
 
                 return onUnknown({
-                    id: id,
-                    url: url,
-                    message: "unknown fetch google error",
+                    reason: "unknown fetch google error",
                     fetchResponse: fetchResponse
                 });
             }
