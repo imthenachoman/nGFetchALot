@@ -248,6 +248,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "batch item request error; requeuing request",
     details: {
+        kind: "batch item",
         httpResponseCode: httpResponseCode,
         httpResponseMessage: httpResponseMessage,
         responseJSON: responseJSON
@@ -260,7 +261,11 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "warning",
     message: "batch request error: unknown fetch error; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
-    details: fetch `error`,
+    details: {
+        kind: "network",
+        message: "...",
+        errorName: "..."
+    },
     id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
@@ -269,7 +274,13 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "warning",
     message: "batch request error: google failure with retrable code; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
-    details: fetch `response`,
+    details: {
+        kind: "http",
+        message: `HTTP [status] ([text]),
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        retryAfter: "..."
+    },
     id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
@@ -278,7 +289,11 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "warning",
     message: "solo request error: unknown fetch error; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
-    details: fetch `error`,
+    details: {
+        kind: "network",
+        message: "...",
+        errorName: "..."
+    },
     id: "..."
 }
 ```
@@ -287,7 +302,13 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "warning",
     message: "solo request error: google failure with retrable code; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
-    details: fetch `response`,
+    details: {
+        kind: "http",
+        message: `HTTP [status] ([text]),
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        retryAfter: "..."
+    },
     id: "..."
 }
 ```
@@ -297,6 +318,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "error",
     message: "batch item request error; not retryable; skipping",
     details: {
+        kind: "batch item",
         httpResponseCode: httpResponseCode,
         httpResponseMessage: httpResponseMessage,
         responseJSON: responseJSON
@@ -322,7 +344,13 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "error",
     message: "batch request failure: unknown google error; skipping requests",
-    details: fetch `response`,
+    details: {
+        kind: "http",
+        message: `HTTP [status] ([text]),
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        retryAfter: "..."
+    },
     id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
@@ -331,7 +359,13 @@ Every item in `queue` is either a solo request or a batch request.
 {
     type: "error",
     message: "solo request failure: unknown google error; skipping request",
-    details: fetch `response`,
+    details: {
+        kind: "http",
+        message: `HTTP [status] ([text]),
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        retryAfter: "..."
+    },
     id: "..."
 }
 ```

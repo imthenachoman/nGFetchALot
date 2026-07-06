@@ -692,7 +692,11 @@ function nGFetchALot({
             console.error(`unknown fetch error for ${url}; retrying:`, error, {id, url, contentType, body});
             return {
                 message: "unknown fetch error",
-                details: error,
+                details: {
+                    kind: "network",
+                    message: error?.message || String(error),
+                    errorName: error?.name || null
+                },
                 ...handleRetryLogic()
             };
         }
@@ -706,7 +710,13 @@ function nGFetchALot({
                 console.error(`google failure with retrable code ${fetchResponse.status}`, fetchResponse, {id, url, contentType, body});
                 return {
                     message: "google failure with retrable code",
-                    details: fetchResponse,
+                    details: {
+                        kind: "http",
+                        message: `HTTP ${response.status}${response.statusText ? ` (${response.statusText})` : ""}`,
+                        httpResponseCode: response.status,
+                        httpResponseMessage: response.statusText || null,
+                        retryAfter: fetchResponse.headers.get('Retry-After')
+                    },
                     ...handleRetryLogic(fetchResponse.headers.get('Retry-After'))
                 };
             }
@@ -717,7 +727,13 @@ function nGFetchALot({
                 return {
                     status: "failure",
                     message: "unknown google error",
-                    details: fetchResponse
+                    details: {
+                        kind: "http",
+                        message: `HTTP ${response.status}${response.statusText ? ` (${response.statusText})` : ""}`,
+                        httpResponseCode: response.status,
+                        httpResponseMessage: response.statusText || null,
+                        retryAfter: fetchResponse.headers.get('Retry-After')
+                    }
                 }
             }
         }
