@@ -141,7 +141,7 @@ Every item in `queue` is either a solo request or a batch request.
 | Option           | Default    | What it does                                                                    |
 | ---------------- | ---------- | ------------------------------------------------------------------------------- |
 | `authToken`      | *required* | OAuth2 bearer token sent with every request                                     |
-| `queue`          | *required* | The [request(s)]((#queue-item)) to process                                      |
+| `queue`          | *required* | The [request(s)](#queue-item) to process                                      |
 | `maxWorkers`     | `4`        | How many requests can be in flight at once                                      |
 | `maxItemRetry`   | `4`        | How many times a single failing item is retried before it's given up on         |
 | `maxGlobalRetry` | `4`        | How many rate-limit "waves" the whole pool tolerates before stopping entirely   |
