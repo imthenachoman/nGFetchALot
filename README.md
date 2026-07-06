@@ -1,18 +1,32 @@
-# nGFetchALot
+# nGFetchALot <!-- omit from toc -->
 
-A small library for fetching lots of Google API requests at once — concurrently, in batches, with automatic pagination and retries — without writing that plumbing yourself.
+A small library for optimized Google API requests, including batch requests, with automatic pagination and exponentially backedoff retries.
+
+## Table of Contents <!-- omit from toc -->
+
+- [What it does](#what-it-does)
+- [Quick start](#quick-start)
+- [Batching many requests together](#batching-many-requests-together)
+- [Cancelling a run](#cancelling-a-run)
+- [Queue item](#queue-item)
+  - [Solo request](#solo-request)
+  - [Batch request](#batch-request)
+- [Options](#options)
+- [Callbacks](#callbacks)
+  - [`onItemDone` argument shapes](#onitemdone-argument-shapes)
+  - [`onEvent` argument shapes](#onevent-argument-shapes)
 
 ## What it does
 
-You give it a list of requests and a few callbacks. It handles the rest:
+You call it with an array of requests and a few callbacks. It handles the rest:
 
 - Runs several requests at once using a small pool of workers (`maxWorkers`)
 - Groups requests that share a `batchUrl` into a single Google API batch call instead of one HTTP request per item
 - Follows `nextPageToken` automatically until each item's results are fully collected
-- Retries failed items on their own, and separately backs off the *entire* pool when Google starts rate-limiting you
+- Retries failed items on their own using exponential backoff when Google starts rate-limiting
 - Can be cancelled mid-run
 
-It's plain JavaScript with no dependencies, built to run in a browser — for example, inside the client-side HTML of a Google Apps Script web app.
+It's plain JavaScript with no dependencies, built to run client side in a browser — for example, inside the client-side HTML of a Google Apps Script web app.
 
 ## Quick start
 
@@ -25,13 +39,9 @@ const job = nGFetchALot({
         id: folderId,
         url: `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents&pageSize=100`
     })),
-    onItemNextPage: (id, numPages) => console.log(`${id}: fetching page ${numPages + 1}...`),
-    onItemDone: (id, pages) => {
-        const allFiles = pages.flatMap(page => page.files);
-        console.log(`${id}: found ${allFiles.length} files across ${pages.length} page(s)`);
-    },
-    onError: (data) => console.error('Failed:', data),
-    onQueueDone: (fetchCount) => console.log(`Done — ${fetchCount} requests sent.`)
+    onItemDone: ({id, success, pages, message}) => console.log([id, success, pages, message]),
+    onQueueDone: () => console.log('queue done'),
+    onEvent: ({type, message, details, request}) => console.log([type, message, details, request]),
 });
 
 await job.done; // optional — wait for the whole queue to finish
@@ -53,8 +63,9 @@ const job = nGFetchALot({
         batchUrl: 'https://www.googleapis.com/batch/drive/v3',
         apiPath: `/drive/v3/files/${fileId}?fields=id,name,modifiedTime`
     })),
-    onItemDone: (id, pages) => console.log(id, pages[0].name),
-    onError: (data) => console.error(data)
+    onItemDone: ({id, success, pages, message}) => console.log([id, success, pages, message]),
+    onQueueDone: () => console.log('queue done'),
+    onEvent: ({type, message, details, request}) => console.log([type, message, details, request]),
 });
 ```
 
@@ -68,13 +79,7 @@ Items that share the same `batchUrl` are grouped into batches of up to `batchSiz
 let job;
 
 startButton.onclick = () => {
-    job = nGFetchALot({
-        authToken: oauthToken,
-        queue: buildLargeQueue(),
-        onItemDone: () => updateProgressBar(),
-        onQueueDone: () => showMessage('Finished!'),
-        onError: (data) => console.error(data)
-    });
+    job = nGFetchALot({...});
 };
 
 cancelButton.onclick = () => {
@@ -84,9 +89,11 @@ cancelButton.onclick = () => {
 // job.done resolves once every worker has actually exited
 ```
 
-## Request shapes
+## Queue item
 
-Every item in `queue` is either a solo request or a batch request:
+Every item in `queue` is either a solo request or a batch request.
+
+### Solo request
 
 ```js
 // Solo — fetched on its own
@@ -94,45 +101,230 @@ Every item in `queue` is either a solo request or a batch request:
     id: 'unique-id',
     url: 'https://...',
     body: optionalBody,
-    contentType: optionalType
+    contentType: optionalContentType
+},
+{
+    id: 'unique-id',
+    url: 'https://...',
 }
+```
 
+### Batch request
+
+```js
 // Batch — grouped with other items that share the same batchUrl
 {
     id: 'unique-id',
     batchUrl: 'https://www.googleapis.com/batch/...',
     apiPath: '/drive/v3/files/abc',
     body: optionalBody
+    contentType: optionalContentType
+},
+{
+    id: 'unique-id',
+    batchUrl: 'https://www.googleapis.com/batch/...',
+    apiPath: '/drive/v3/files/abc',
+},
+{
+    id: 'unique-id',
+    batchUrl: 'https://www.googleapis.com/batch/...',
+    apiPath: '/drive/v3/files/abc',
+    body: optionalBody
 }
+
 ```
 
 `body` can be a string or a plain object (objects are JSON-stringified for you). If `body` is present, the request is sent as `POST`; otherwise it's a `GET`.
 
 ## Options
 
-| Option | Default | What it does |
-|---|---|---|
-| `authToken` | *required* | OAuth2 bearer token sent with every request |
-| `queue` | `[]` | The requests to process |
-| `maxWorkers` | `4` | How many requests can be in flight at once |
-| `maxItemRetry` | `4` | How many times a single failing item is retried before it's given up on |
-| `maxGlobalRetry` | `4` | How many rate-limit "waves" the whole pool tolerates before stopping entirely |
-| `maxRetryDelay` | `30` | Cap, in seconds, on backoff delay when no `Retry-After` header is given |
-| `batchSize` | `50` | Max items grouped into one batch call |
-| `batchBoundary` | `batch_nGFetchALot_request_boundary` | MIME boundary used in batch request bodies — rarely needs changing |
-| `debug` | `false` | Logs detailed step-by-step worker activity to the console |
+| Option           | Default    | What it does                                                                    |
+| ---------------- | ---------- | ------------------------------------------------------------------------------- |
+| `authToken`      | *required* | OAuth2 bearer token sent with every request                                     |
+| `queue`          | *required* | The [request(s)]((#queue-item)) to process                                      |
+| `maxWorkers`     | `4`        | How many requests can be in flight at once                                      |
+| `maxItemRetry`   | `4`        | How many times a single failing item is retried before it's given up on         |
+| `maxGlobalRetry` | `4`        | How many rate-limit "waves" the whole pool tolerates before stopping entirely   |
+| `maxRetryDelay`  | `30`       | Max seconds for exponential backoff delay when no `Retry-After` header is given |
+| `batchSize`      | `50`       | Max items grouped into one batch call                                           |
 
 ## Callbacks
 
-| Callback | Fires when | Arguments |
-|---|---|---|
-| `onItemDone` | An item's last page has arrived | `(id, pages, workerID)` |
-| `onItemNextPage` | Another page is on the way for an item | `(id, numPages, workerID)` |
-| `onQueueDone` | The whole queue finished normally | `(fetchCount)` |
-| `onError` | An item was given up on, or the run stopped early | `(data)` — shape varies by failure |
+| Callback                                    | Fires when                                  | Arguments                             |
+| ------------------------------------------- | ------------------------------------------- | ------------------------------------- |
+| [`onItemDone`](#onitemdone-argument-shapes) | An item has been fully processed, or failed | `({id, success, pages, message})`     |
+| `onQueueDone`                               | The whole queue finished                    | `()`                                  |
+| [`onEvent`](#onevent-argument-shapes)       | An event occured                            | `({type, message, details, request})` |
 
-## How retries work
 
-Two layers, working independently. If one item keeps failing, it's retried up to `maxItemRetry` times and then reported through `onError` — nothing else is affected. If Google starts rate-limiting you, every worker pauses together for a backoff period that grows with each wave of failures; if that keeps happening past `maxGlobalRetry` waves, the whole run stops, `onError` fires to explain why, and `onQueueDone` is skipped.
+### `onItemDone` argument shapes
 
-Status codes `429`, `500`, `502`, `503`, and `504` are treated as retryable. A `409` conflict is not retried automatically, since resending the exact same request rarely resolves a real conflict.
+```
+{
+    id: `...`,
+    success: `true`,
+    pages: `[{...}, {...}, ...]`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `batch item retry limit exceeded; skipping`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `batch item failure; not retryable; skipping`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `batch item not found in response; skipping`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `batch request failure; skipping`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `solo item retry limit exceeded; skipping`
+}
+```
+
+```
+{
+    id: `...`,
+    success: `false`,
+    message: `solo request failure; skipping`
+}
+```
+
+### `onEvent` argument shapes
+
+```
+{
+    type: "info",
+    message: "Sleeping for XX milliseconds...",
+}
+```
+
+```
+{
+    type: "info",
+    message: "getting next page",
+    details: {
+        id: "...",
+        pagesSoFar: #
+    },
+    request: queueItem
+}
+```
+
+```
+{
+    type: "warning",
+    message: "batch item request error; requeuing request",
+    details: {
+        httpResponseCode: httpResponseCode,
+        httpResponseMessage: httpResponseMessage,
+        responseJSON: responseJSON
+    },
+    request: queueItem
+}
+```
+
+```
+{
+    type: "warning",
+    message: "batch request error: unknown fetch error; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
+    details: fetch `error`,
+    request: batchRequests
+}
+```
+
+```
+{
+    type: "warning",
+    message: "batch request error: google failure with retrable code; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
+    details: fetch `response`,
+    request: batchRequests
+}
+```
+
+```
+{
+    type: "warning",
+    message: "solo request error: unknown fetch error; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
+    details: fetch `error`,
+    request: queueItem
+}
+```
+
+```
+{
+    type: "warning",
+    message: "solo request error: google failure with retrable code; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
+    details: fetch `response`,
+    request: queueItem
+}
+```
+
+```
+{
+    type: "error",
+    message: "batch item request error; not retryable; skipping",
+    details: {
+        httpResponseCode: httpResponseCode,
+        httpResponseMessage: httpResponseMessage,
+        responseJSON: responseJSON
+    },
+    request: queueItem
+}
+```
+
+```
+{
+    type: "error",
+    message: "batch item not found in response; skipping",
+    details: {
+        responseData: responseData,
+        boundary: boundary,
+        responseParts: responseParts
+    },
+    request: queueItem
+}
+```
+
+```
+{
+    type: "error",
+    message: "batch request failure: unknown google error; skipping requests",
+    details: fetch `response`,
+    request: batchRequests
+}
+```
+
+```
+{
+    type: "error",
+    message: "solo request failure: unknown google error; skipping request",
+    details: fetch `response`,
+    request: queueItem
+}
+```

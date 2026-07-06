@@ -1,13 +1,73 @@
 /**
- * nGFetchALot
+ * Concurrently fetches a queue of Google API requests using a small pool of workers,
+ * automatically grouping requests that share a `batchUrl` into Google API multipart/mixed
+ * batch calls, following `nextPageToken` pagination to completion for every item, and
+ * retrying failures using both a per-item retry budget and a global rate-limit circuit
+ * breaker that pauses - and can ultimately halt - the entire pool.
+ *
+ * Each entry in `queue` is either a **solo request** (fetched directly)
+ * or a **batch request** that is grouped with other items sharing the same `batchUrl`.
+ *
+ * Processing begins as soon as this function is called - it does not need to be awaited to
+ * start. This function itself returns synchronously with a controller so the
+ * caller can stop processing early. Await the returned `done` promise if you need to
+ * know when the run has fully finished.
  * 
- * A small library for optimized Google API requests, including batch requests,
- * with automatic pagination and exponentially backedoff retries.
+ * @param {Object}         options                      - Configuration options for the run
+ * @param {string}         options.authToken            - OAuth2 bearer token, sent as `Authorization: Bearer <token>` on every request
+ * @param {Object}        [options.queue=[]           ] - The requests to process
+ * @param {string}         options.queue[].id           - Unique identifier for this request, used in callbacks and error reporting
+ * @param {string}        [options.queue[].url        ] - The full URL to fetch for a solo request
+ * @param {string}        [options.queue[].batchUrl   ] - The base URL for a Google API batch request (e.g., `https://www.googleapis.com/batch/drive/v3`)
+ * @param {string}        [options.queue[].apiPath    ] - The API path for a Google API batch request (e.g., `/drive/v3/files/abc`)
+ * @param {string}        [options.queue[].contentType] - The `Content-Type` header for this request (default: `application/json`)
+ * @param {Object|string} [options.queue[].body       ] - The request body for this request (default: none)
+ * @param {Function}      [onItemDone                 ] - Called once per queue item, after its final page has been fetched, with every page
+ *                                                        collected for that item.
+ *                                                        signature: `(id: string, pages: Array<Object>, workerID: string) => void`
+ * @param {Function}      [onItemNextPage             ] - Called each time a page is fetched for an item and the response indicated another page
+ *                                                        remains (a `nextPageToken` was present).
+ *                                                        signature: `(id: string, numPages: number, workerID: string) => void`
+ * @param {Function}      [onQueueDone                ] - Called once, after every worker has exited because the queue is fully drained.
+ *                                                        Not called if `stop()` was invoked or the circuit breaker tripped.
+ *                                                        signature: `(fetchCount: number) => void`
+ * @param {Function}      [onError                    ] - Called for every unrecoverable failure: per-item retry exhaustion,
+ *                                                        non-retryable HTTP responses, unknown/network errors, and the global circuit
+ *                                                        breaker tripping.
+ *                                                        signature: `(details: Object) => void`
+ * @param {number}        [maxWorkers=4               ] - Number of concurrent workers pulling from the queue.
+ *                                                        Each worker processes one solo item or one batch group at a time.
+ * @param {number}        [maxGlobalRetry=4           ] - Number of consecutive global rate-limit "waves" (429/5xx responses, deduplicated
+ *                                                        across workers that hit the same wave simultaneously) tolerated before the
+ *                                                        circuit breaker trips and all processing stops.
+ * @param {number}        [maxItemRetry=4             ] - Number of times a single queue item may be retried before it is abandoned
+ *                                                        and reported via `onError`.
+ * @param {number}        [maxRetryDelay=30           ] - Upper bound, in seconds, on the exponential backoff delay used when a retryable
+ *                                                        response doesn't include a usable `Retry-After` header.
+ * @param {number}        [batchSize=50               ] - Maximum number of same-`batchUrl` items grouped into a single multipart batch request.
+ * @param {string}        [batchBoundary="..."        ] - MIME multipart boundary string used when building batch request bodies.
+ *                                                        Must not appear inside any request body it will wrap.
  * 
- * author: imthenachoman@gmail.com
- * github: https://github.com/imthenachoman/nGFetchALot/
+ * @returns {Object}                                    - A controller for the run that was just started.
+ *                                                        The `.stop()` method can be called to halt processing early, and the `.done`
+ *                                                        promise resolves once all workers have exited (or the circuit breaker tripped).
+ *
+ * @throws {TypeError}                                  - If `authToken` is falsy, or if any of the call back functions are not functions.
+ *
+ * @example
+ * const job = nGFetchALot({
+ *     authToken: token,
+ *     queue: [
+ *         { id: 'sheet-1', url: 'https://sheets.googleapis.com/...' },
+ *         { id: 'file-1', batchUrl: 'https://www.googleapis.com/batch/drive/v3', apiPath: '/drive/v3/files/abc' }
+ *     ],
+ *     onItemDone: (id, pages) => console.log(id, 'finished with', pages.length, 'pages'),
+ *     onError: (data) => console.error('item failed:', data)
+ * });
+ *
+ * stopButton.onclick = () => job.stop();
+ * await job.done;
  */
-
 function nGFetchALot({
     authToken,
     queue: userQueue = [],
@@ -19,6 +79,7 @@ function nGFetchALot({
     maxItemRetry: MAX_RETRY_ATTEMPTS_ITEM = 4,
     maxRetryDelay: MAX_RETRY_DELAY = 30,
     batchSize: GOOGLE_API_BATCHING_SIZE = 50,
+    batchBoundary: GOOGLE_API_BATCHING_BOUNDARY = "batch_nGFetchALot_request_boundary",
 })
 {
     // #region make user provided functions safe to call
@@ -26,32 +87,14 @@ function nGFetchALot({
     const onItemDone = makeUserFunctionSafeToCall(userOnItemDone, "onItemDone");
     const onQueueDone = makeUserFunctionSafeToCall(userOnQueueDone, "onQueueDone");
     const onEvent = makeUserFunctionSafeToCall(userOnEvent, "onEvent");
-
+    
     // #endregion
 
     // #region global variables
 
     // settings/constants
-    const GOOGLE_API_BATCHING_BOUNDARY = "batch_nGFetchALot_request_boundary";
     const RETRYABLE_HTTP_STATUS_CODES = {429: true, 500: true, 502: true, 503: true, 504: true};
     const TEXT_ENCODER = new TextEncoder();
-
-    let isDoneProcessingQueue = false;            // if we need to stop all workers, for whatever reason
-    let numActiveWorkers = 0;                     // track how many concurrent workers we have
-
-    let globalCooldownWaitUntil = 0;              // Absolute time barrier workers must sleep until
-    let consecutiveFailureCount = 0;              // Strict continuous failure wave counter (The Kill-Switch)
-    let killSwitchTripped = false;
-
-    // #endregion
-
-    // #region main execution
-
-    // if no authtoken, we can't do anything
-    if(!authToken)
-    {
-        throw new TypeError("The 'authToken' parameter is required.");
-    }
 
     // make a copy of the queue
     // store the queue in reverse order from the input
@@ -98,6 +141,24 @@ function nGFetchALot({
         })
         .reverse();
 
+    let isDoneProcessingQueue = false;            // if we need to stop all workers, for whatever reason
+    let numActiveWorkers = 0;                     // track how many concurrent workers we have
+
+    // FIXED state management for BUG-04 and ARCH-01
+    let globalCooldownWaitUntil = 0;              // Absolute time barrier workers must sleep until
+    let consecutiveFailureCount = 0;              // Strict continuous failure wave counter (The Kill-Switch)
+    let killSwitchTripped = false;
+
+    // #endregion
+
+    // #region main execution
+
+    // if no authtoken, we can't do anything
+    if(!authToken)
+    {
+        throw new TypeError("The 'authToken' parameter is required.");
+    }
+
     // do the main magic
     const done = (async () =>
     {
@@ -141,9 +202,9 @@ function nGFetchALot({
 
     // #endregion
 
-    // #region worker and processing stuff
+    // #region worker stuff functions
 
-    // Each worker runs in a loop until the queue is empty and all workers are done, or until the kill switch is tripped
+    // Each worker runs in a loop until the queue is empty and all workers are done, or until the kill switch is tripped.
     async function worker(workerID)
     {
         while(!isDoneProcessingQueue)
@@ -246,117 +307,159 @@ function nGFetchALot({
             body: batchBodyContent
         });
 
-        if(ret.status == "success")
+        if(ret)
         {
-            const {responseData, reponseContentType} = ret;
-
-            // the batch request was a success
-            // extract and handle each batch request item
-            const boundaryMatch = reponseContentType.match(/boundary=([^;]+)/i);
-            const boundary = boundaryMatch ? boundaryMatch[1].trim().replace(/['"]/g, "") : null;
-
-            const responseParts = parseBatchRequestResponse(responseData, boundary);
-
-            // match parsed json respones against the original batch requests
-            for(let i = 0, numBatchRequests = batchRequests.length; i < numBatchRequests; ++i)
+            if(ret.success)
             {
-                const queueItem = batchRequests[i];
-                const itemId = queueItem.id;
+                const {responseData, reponseContentType} = ret;
 
-                const responseMatch = responseParts[itemId];
+                // the batch request was a success
+                // extract and handle each batch request item
+                const boundaryMatch = reponseContentType.match(/boundary=([^;]+)/i);
+                const boundary = boundaryMatch ? boundaryMatch[1].trim().replace(/['"]/g, "") : null;
 
-                if(responseMatch)
+                const responseParts = parseBatchRequestResponse(responseData, boundary);
+
+                // match parsed json respones against the original batch requests
+                for(let i = 0, numBatchRequests = batchRequests.length; i < numBatchRequests; ++i)
                 {
-                    const {httpResponseCode, httpResponseMessage, retryAfter, responseJSON} = responseMatch;
+                    const queueItem = batchRequests[i];
+                    const itemId = queueItem.id;
 
-                    // if the individual response was good, we can process it
-                    if(httpResponseCode == 200)
-                    {
-                        processPages(queueItem, responseJSON);
-                    }
-                    else if(RETRYABLE_HTTP_STATUS_CODES.hasOwnProperty(httpResponseCode))
-                    {
-                        onEvent({
-                            type: "warning",
-                            message: `batch item request error; requeuing request`,
-                            details: {
-                                httpResponseCode: httpResponseCode,
-                                httpResponseMessage: httpResponseMessage,
-                                responseJSON: responseJSON
-                            },
-                            request: queueItem
-                        });
+                    const responseMatch = responseParts[itemId];
 
-                        // only push if we haven't hit retry limit
-                        if(queueItem._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
+                    if(responseMatch)
+                    {
+                        const {httpResponseCode, httpResponseMessage, retryAfter, responseJSON} = responseMatch;
+
+                        // if the individual response was good, we can process it
+                        if(httpResponseCode == 200)
                         {
-                            queueItem._retryCount++;
-                            queue.push(queueItem);
+                            processPages(queueItem, responseJSON);
+                        }
+                        else if(RETRYABLE_HTTP_STATUS_CODES.hasOwnProperty(httpResponseCode))
+                        {
+                            // only push if we haven't hit retry limit
+                            if(queueItem._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
+                            {
+                                queueItem._retryCount++;
+                                queue.push(queueItem);
+                            }
+                            else
+                            {
+                                onItemDone({
+                                    id: queueItem.id,
+                                    success: false,
+                                    message: "retry limit exceeded; skipping",
+                                    details: {
+                                        httpResponseCode: httpResponseCode,
+                                        httpResponseMessage: httpResponseMessage,
+                                        responseJSON: responseJSON
+                                    }
+                                });
+                            }
                         }
                         else
                         {
                             onItemDone({
                                 id: queueItem.id,
                                 success: false,
-                                message: "batch item retry limit exceeded; skipping"
+                                message: "not retryable; skipping",
+                                details: {
+                                    httpResponseCode: httpResponseCode,
+                                    httpResponseMessage: httpResponseMessage,
+                                    responseJSON: responseJSON
+                                }
                             });
                         }
                     }
-                    else // failure
+                    else
                     {
-                        onEvent({
-                            type: "error",
-                            message: `batch item request error; not retryable; skipping`,
-                            details: {
-                                httpResponseCode: httpResponseCode,
-                                httpResponseMessage: httpResponseMessage,
-                                responseJSON: responseJSON
-                            },
-                            request: queueItem
-                        });
-
                         onItemDone({
                             id: queueItem.id,
                             success: false,
-                            message: "batch item failure; not retryable; skipping",
+                            message: "queue item not found in response",
+                            details: {
+                                responseData: responseData,
+                                boundary: boundary,
+                                responseParts: responseParts
+                            }
                         });
                     }
                 }
-                else
-                {
-                    onEvent({
-                        type: "error",
-                        message: "batch item not found in response; skipping",
-                        details: {
-                            responseData: responseData,
-                            boundary: boundary,
-                            responseParts: responseParts
-                        },
-                        request: queueItem
-                    });
+            }
+            else if(ret.retryable)
+            {
+                onEvent({
+                    type: "warning",
+                    message: `batch request error: ${ret.message}; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
+                    details: ret.details,
+                    request: batchRequests
+                });
 
+                // we need to reque the batch requests that we can
+                // do in reverse order to preserve priority
+                for(let i = batchRequests.length - 1; i >= 0; i--)
+                {
+                    const queueItem = batchRequests[i];
+
+                    // only push if we haven't hit retry limit
+                    if(queueItem._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
+                    {
+                        queueItem._retryCount++;
+                        queue.push(queueItem);
+                    }
+                    else
+                    {
+                        onItemDone({
+                            id: queueItem.id,
+                            success: false,
+                            message: "retry limit exceeded",
+                        });
+                    }
+                }
+            }
+            else
+            {
+                onEvent({
+                    type: "error",
+                    message: `batch request error: ${ret.message}; abandoning batch requests`,
+                    details: ret.details,
+                    request: batchRequests
+                });
+
+                for(const queueItem of batchRequests)
+                {
                     onItemDone({
                         id: queueItem.id,
                         success: false,
-                        message: "batch item not found in response; skipping"
+                        message: `${ret.message}; abandoning request`,
+                        details: ret.details
                     });
                 }
             }
         }
-        else if(ret.status == "retry")
-        {
-            onEvent({
-                type: "warning",
-                message: `batch request error: ${ret.message}; requeuing requests; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
-                details: ret.details,
-                request: batchRequests
-            });
+    }
 
-            // we need to reque the batch requests that we can
-            // do in reverse order to preserve priority
-            for(let i = batchRequests.length - 1; i >= 0; i--)
+    // Processes a single solo request and handles the response
+    async function handleSoloRequest(queueItem)
+    {
+        const ret = await fetchPayload(queueItem);
+
+        if(ret)
+        {
+            if(ret.success)
             {
-                const queueItem = batchRequests[i];
+                processPages(queueItem, ret.responseData)
+            }
+            else if(ret.retryable)
+            {
+                onEvent({
+                    type: "warning",
+                    message: `solo request error: ${ret.message}; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
+                    details: ret.details,
+                    request: queueItem
+                });
 
                 // only push if we haven't hit retry limit
                 if(queueItem._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
@@ -369,79 +472,26 @@ function nGFetchALot({
                     onItemDone({
                         id: queueItem.id,
                         success: false,
-                        message: "batch item retry limit exceeded; skipping",
+                        message: "retry limit exceeded",
                     });
                 }
             }
-        }
-        else if(ret.status == "failure")
-        {
-            onEvent({
-                type: "error",
-                message: `batch request failure: ${ret.message}; skipping requests`,
-                details: ret.details,
-                request: batchRequests
-            });
-
-            for(const queueItem of batchRequests)
-            {
-                onItemDone({
-                    id: queueItem.id,
-                    success: false,
-                    message: `batch request failure; skipping`,
-                });
-            }
-        }
-
-    }
-
-    // Processes a single solo request and handles the response
-    async function handleSoloRequest(queueItem)
-    {
-        const ret = await fetchPayload(queueItem);
-
-        if(ret.status == "success")
-        {
-            processPages(queueItem, ret.responseData)
-        }
-        else if(ret.status == "retry")
-        {
-            onEvent({
-                type: "warning",
-                message: `solo request error: ${ret.message}; requeuing request; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
-                details: ret.details,
-                request: queueItem
-            });
-
-            // only push if we haven't hit retry limit
-            if(queueItem._retryCount < MAX_RETRY_ATTEMPTS_ITEM)
-            {
-                queueItem._retryCount++;
-                queue.push(queueItem);
-            }
             else
             {
+                onEvent({
+                    type: "error",
+                    message: `solo request error: ${ret.message}; abandoning request`,
+                    details: ret.details,
+                    request: queueItem
+                });
+
                 onItemDone({
                     id: queueItem.id,
                     success: false,
-                    message: "solo item retry limit exceeded; skipping",
+                    message: `${ret.message}; abandoning request`,
+                    details: ret.details
                 });
             }
-        }
-        else if(ret.status == "failure")
-        {
-            onEvent({
-                type: "error",
-                message: `solo request failure: ${ret.message}; skipping request`,
-                details: ret.details,
-                request: queueItem
-            });
-
-            onItemDone({
-                id: queueItem.id,
-                success: false,
-                message: `solo request failure; skipping`,
-            });
         }
     }
 
@@ -636,7 +686,15 @@ function nGFetchALot({
 
     // #region fetch logic
 
-    // Performs the actual `fetch()` call for one request (solo or batch)
+    /**
+     * Performs the actual `fetch()` call for one request (solo or batch) and classifies the
+     * outcome into exactly one of four handlers:
+     *
+     *  - ``   - 
+     *  - `onRetryable` - a retryable HTTP status (429, 500, 502, 503, or 504)
+     *  - `onUnknown`   - any any unknown errors
+     *  - `onError`     - called for known errors
+     */
     async function fetchPayload({id, url, contentType, body})
     {
         // Dynamically build Fetch configuration options
@@ -670,7 +728,7 @@ function nGFetchALot({
         }
         catch(error)
         {
-            // TO DO: catch transient network errors like a momentary disconnect
+            // TO DO: catch transient network errors like a momentary disconnect; BUG-02 (https://gemini.google.com/app/d29994b23668ac56)
             // for now, just retry everything
 
             console.error(`unknown fetch error for ${url}; retrying:`, error, {id, url, contentType, body});
@@ -698,8 +756,10 @@ function nGFetchALot({
             {
                 // if it's not retryable, 
                 console.error('unknown google error', fetchResponse, {id, url, contentType, body});
+
                 return {
-                    status: "failure",
+                    success: false,
+                    retryable: false,
                     message: "unknown google error",
                     details: fetchResponse
                 }
@@ -722,7 +782,7 @@ function nGFetchALot({
             {
                 // return the text/body response
                 return {
-                    status: "success",
+                    success: true,
                     responseData: await fetchResponse.text(),
                     reponseContentType: reponseContentType
                 };
@@ -731,7 +791,7 @@ function nGFetchALot({
             {
                 // return the json response
                 return {
-                    status: "success",
+                    success: true,
                     responseData: await fetchResponse.json(),
                     reponseContentType: reponseContentType
                 };
@@ -747,7 +807,8 @@ function nGFetchALot({
         // ARCH-01 FIX: If we are already in an active cooldown window, ignore subsequent concurrent errors.
         // The first worker to hit the error sets the penalty; the other 3 workers register it but do not stack it.
         if(now < globalCooldownWaitUntil) return {
-            status: "retry",
+            success: false,
+            retryable: true,
             waitUntil: globalCooldownWaitUntil,
             failureCount: consecutiveFailureCount,
         };
@@ -811,7 +872,8 @@ function nGFetchALot({
             }
 
             return {
-                status: "retry",
+                success: false,
+                retryable: true,
                 waitUntil: globalCooldownWaitUntil,
                 failureCount: consecutiveFailureCount,
             };
