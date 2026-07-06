@@ -712,9 +712,9 @@ function nGFetchALot({
                     message: "google failure with retrable code",
                     details: {
                         kind: "http",
-                        message: `HTTP ${response.status}${response.statusText ? ` (${response.statusText})` : ""}`,
-                        httpResponseCode: response.status,
-                        httpResponseMessage: response.statusText || null,
+                        message: `HTTP ${fetchResponse.status}${fetchResponse.statusText ? ` (${fetchResponse.statusText})` : ""}`,
+                        httpResponseCode: fetchResponse.status,
+                        httpResponseMessage: fetchResponse.statusText || null,
                         retryAfter: fetchResponse.headers.get('Retry-After')
                     },
                     ...handleRetryLogic(fetchResponse.headers.get('Retry-After'))
@@ -729,9 +729,9 @@ function nGFetchALot({
                     message: "unknown google error",
                     details: {
                         kind: "http",
-                        message: `HTTP ${response.status}${response.statusText ? ` (${response.statusText})` : ""}`,
-                        httpResponseCode: response.status,
-                        httpResponseMessage: response.statusText || null,
+                        message: `HTTP ${fetchResponse.status}${fetchResponse.statusText ? ` (${fetchResponse.statusText})` : ""}`,
+                        httpResponseCode: fetchResponse.status,
+                        httpResponseMessage: fetchResponse.statusText || null,
                         retryAfter: fetchResponse.headers.get('Retry-After')
                     }
                 }
