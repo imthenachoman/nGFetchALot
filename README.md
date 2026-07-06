@@ -249,9 +249,9 @@ Every item in `queue` is either a solo request or a batch request.
     message: "batch item request error; requeuing request",
     details: {
         kind: "batch item",
-        httpResponseCode: httpResponseCode,
-        httpResponseMessage: httpResponseMessage,
-        responseJSON: responseJSON
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        responseJSON: {...}
     },
     id: "..."
 }
@@ -279,6 +279,7 @@ Every item in `queue` is either a solo request or a batch request.
         message: `HTTP [status] ([text]),
         httpResponseCode: "...",
         httpResponseMessage: "...",
+        httpResponseJSON: {...}
         retryAfter: "..."
     },
     id: ["...", "...", ...] // array of the IDs of all the requests in this batch
@@ -307,6 +308,7 @@ Every item in `queue` is either a solo request or a batch request.
         message: `HTTP [status] ([text]),
         httpResponseCode: "...",
         httpResponseMessage: "...",
+        httpResponseJSON: {...}
         retryAfter: "..."
     },
     id: "..."
@@ -319,9 +321,9 @@ Every item in `queue` is either a solo request or a batch request.
     message: "batch item request error; not retryable; skipping",
     details: {
         kind: "batch item",
-        httpResponseCode: httpResponseCode,
-        httpResponseMessage: httpResponseMessage,
-        responseJSON: responseJSON
+        httpResponseCode: "...",
+        httpResponseMessage: "...",
+        responseJSON: {...}
     },
     id: "..."
 }
@@ -332,9 +334,9 @@ Every item in `queue` is either a solo request or a batch request.
     type: "error",
     message: "batch item not found in response; skipping",
     details: {
-        responseData: responseData,
-        boundary: boundary,
-        responseParts: responseParts
+        responseData: {...},
+        boundary: "...",
+        responseParts: {...}
     },
     id: "..."
 }
@@ -349,6 +351,7 @@ Every item in `queue` is either a solo request or a batch request.
         message: `HTTP [status] ([text]),
         httpResponseCode: "...",
         httpResponseMessage: "...",
+        httpResponseJSON: {...},
         retryAfter: "..."
     },
     id: ["...", "...", ...] // array of the IDs of all the requests in this batch
@@ -364,6 +367,7 @@ Every item in `queue` is either a solo request or a batch request.
         message: `HTTP [status] ([text]),
         httpResponseCode: "...",
         httpResponseMessage: "...",
+        httpResponseJSON: {...},
         retryAfter: "..."
     },
     id: "..."

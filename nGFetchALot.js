@@ -704,36 +704,33 @@ function nGFetchALot({
         // Even though the request was good, Google/API returned an error code
         if(!fetchResponse.ok)
         {
+            const fetchErrorDetails = {
+                kind: "http",
+                message: `HTTP ${fetchResponse.status}${fetchResponse.statusText ? ` (${fetchResponse.statusText})` : ""}`,
+                httpResponseCode: fetchResponse.status,
+                httpResponseMessage: fetchResponse.statusText || null,
+                httpResponseJSON: await fetchResponse.json(),
+                retryAfter: fetchResponse.headers.get('Retry-After')
+            }
+
             // if the request is retryable
             if(RETRYABLE_HTTP_STATUS_CODES.hasOwnProperty(fetchResponse.status))
             {
-                console.error(`google failure with retrable code ${fetchResponse.status}`, fetchResponse, {id, url, contentType, body});
+                console.error(`google failure with retrable code ${fetchResponse.status}`, fetchErrorDetails, {id, url, contentType, body});
                 return {
                     message: "google failure with retrable code",
-                    details: {
-                        kind: "http",
-                        message: `HTTP ${fetchResponse.status}${fetchResponse.statusText ? ` (${fetchResponse.statusText})` : ""}`,
-                        httpResponseCode: fetchResponse.status,
-                        httpResponseMessage: fetchResponse.statusText || null,
-                        retryAfter: fetchResponse.headers.get('Retry-After')
-                    },
+                    details: fetchErrorDetails,
                     ...handleRetryLogic(fetchResponse.headers.get('Retry-After'))
                 };
             }
             else
             {
                 // if it's not retryable, 
-                console.error('unknown google error', fetchResponse, {id, url, contentType, body});
+                console.error('unknown google error', fetchErrorDetails, {id, url, contentType, body});
                 return {
                     status: "failure",
                     message: "unknown google error",
-                    details: {
-                        kind: "http",
-                        message: `HTTP ${fetchResponse.status}${fetchResponse.statusText ? ` (${fetchResponse.statusText})` : ""}`,
-                        httpResponseCode: fetchResponse.status,
-                        httpResponseMessage: fetchResponse.statusText || null,
-                        retryAfter: fetchResponse.headers.get('Retry-After')
-                    }
+                    details: fetchErrorDetails
                 }
             }
         }
