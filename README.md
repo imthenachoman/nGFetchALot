@@ -41,7 +41,7 @@ const job = nGFetchALot({
     })),
     onItemDone: ({id, success, pages, message}) => console.log([id, success, pages, message]),
     onQueueDone: () => console.log('queue done'),
-    onEvent: ({type, message, details, request}) => console.log([type, message, details, request]),
+    onEvent: ({type, message, details, id}) => console.log([type, message, details, id]),
 });
 
 await job.done; // optional — wait for the whole queue to finish
@@ -65,7 +65,7 @@ const job = nGFetchALot({
     })),
     onItemDone: ({id, success, pages, message}) => console.log([id, success, pages, message]),
     onQueueDone: () => console.log('queue done'),
-    onEvent: ({type, message, details, request}) => console.log([type, message, details, request]),
+    onEvent: ({type, message, details, id}) => console.log([type, message, details, id]),
 });
 ```
 
@@ -154,14 +154,14 @@ Every item in `queue` is either a solo request or a batch request.
 | ------------------------------------------- | ------------------------------------------- | ------------------------------------- |
 | [`onItemDone`](#onitemdone-argument-shapes) | An item has been fully processed, or failed | `({id, success, pages, message})`     |
 | `onQueueDone`                               | The whole queue finished                    | `()`                                  |
-| [`onEvent`](#onevent-argument-shapes)       | An event occured                            | `({type, message, details, request})` |
+| [`onEvent`](#onevent-argument-shapes)       | An event occured                            | `({type, message, details, id})` |
 
 
 ### `onItemDone` argument shapes
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `true`,
     pages: `[{...}, {...}, ...]`
 }
@@ -169,7 +169,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `batch item retry limit exceeded; skipping`
 }
@@ -177,7 +177,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `batch item failure; not retryable; skipping`
 }
@@ -185,7 +185,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `batch item not found in response; skipping`
 }
@@ -193,7 +193,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `batch request failure; skipping`
 }
@@ -201,7 +201,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `solo item retry limit exceeded; skipping`
 }
@@ -209,7 +209,7 @@ Every item in `queue` is either a solo request or a batch request.
 
 ```
 {
-    id: `...`,
+    id: "...",
     success: `false`,
     message: `solo request failure; skipping`
 }
@@ -220,7 +220,14 @@ Every item in `queue` is either a solo request or a batch request.
 ```
 {
     type: "info",
-    message: "Sleeping for XX milliseconds...",
+    message: "waiting for other workers to finish; sleeping for XX milliseconds...",
+}
+```
+
+```
+{
+    type: "info",
+    message: "cooling down before retrying; sleeping for XX milliseconds...",
 }
 ```
 
@@ -232,7 +239,7 @@ Every item in `queue` is either a solo request or a batch request.
         id: "...",
         pagesSoFar: #
     },
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -245,7 +252,7 @@ Every item in `queue` is either a solo request or a batch request.
         httpResponseMessage: httpResponseMessage,
         responseJSON: responseJSON
     },
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -254,7 +261,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "batch request error: unknown fetch error; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `error`,
-    request: batchRequests
+    id: ["...", "...", ...]
 }
 ```
 
@@ -263,7 +270,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "batch request error: google failure with retrable code; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `response`,
-    request: batchRequests
+    id: ["...", "...", ...]
 }
 ```
 
@@ -272,7 +279,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "solo request error: unknown fetch error; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `error`,
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -281,7 +288,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "solo request error: google failure with retrable code; requeuing request; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `response`,
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -294,7 +301,7 @@ Every item in `queue` is either a solo request or a batch request.
         httpResponseMessage: httpResponseMessage,
         responseJSON: responseJSON
     },
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -307,7 +314,7 @@ Every item in `queue` is either a solo request or a batch request.
         boundary: boundary,
         responseParts: responseParts
     },
-    request: queueItem
+    id: "..."
 }
 ```
 
@@ -316,7 +323,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "error",
     message: "batch request failure: unknown google error; skipping requests",
     details: fetch `response`,
-    request: batchRequests
+    id: ["...", "...", ...]
 }
 ```
 
@@ -325,6 +332,6 @@ Every item in `queue` is either a solo request or a batch request.
     type: "error",
     message: "solo request failure: unknown google error; skipping request",
     details: fetch `response`,
-    request: queueItem
+    id: "..."
 }
 ```

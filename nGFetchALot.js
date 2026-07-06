@@ -11,9 +11,9 @@
 function nGFetchALot({
     authToken,
     queue: userQueue = [],
-    onItemDone: userOnItemDone = ({id, success, pages, message, details}) => console.log([id, success, pages, message, details]),
+    onItemDone: userOnItemDone = ({id, success, pages, message}) => console.log([id, success, pages, message]),
     onQueueDone: userOnQueueDone = () => console.log('queue done'),
-    onEvent: userOnEvent = ({type, message, details, request}) => console.log([type, message, details, request]),
+    onEvent: userOnEvent = ({type, message, details, id}) => console.log([type, message, details, id]),
     maxWorkers: MAX_CONCURRENT_WORKERS = 4,
     maxGlobalRetry: MAX_RETRY_ATTEMPTS_GLOBAL = 4,
     maxItemRetry: MAX_RETRY_ATTEMPTS_ITEM = 4,
@@ -63,22 +63,14 @@ function nGFetchALot({
             // we need to make sure each item has a url or batchUrl
             let urlToValidate = queueItem.url || queueItem.batchUrl;
 
-            if(!urlToValidate)
-            {
-                throw new Error(`Missing url/batchUrl in queue item ${index}: ${JSON.stringify(queueItem)}`);
-            }
+            if(!queueItem.id) throw new TypeError(`Missing id in queue item ${index}: ${JSON.stringify(queueItem)}`);
+            if(!urlToValidate) throw new TypeError(`Missing url/batchUrl in queue item ${index}: ${JSON.stringify(queueItem)}`);
 
             if(queueItem.batchUrl)
             {
-                if(!queueItem.apiPath)
-                {
-                    throw new Error(`Missing apiPath in batch queue item ${index}: ${JSON.stringify(queueItem)}`);
-                }
-                else
-                {
-                    // for batch urls, we want to validate the full path
-                    urlToValidate = queueItem.batchUrl + queueItem.apiPath;
-                }
+                if(!queueItem.apiPath) throw new TypeError(`Missing apiPath in batch queue item ${index}: ${JSON.stringify(queueItem)}`);
+                // for batch urls, we want to validate the full path
+                else urlToValidate = queueItem.batchUrl + queueItem.apiPath;
             }
 
             try
@@ -87,7 +79,7 @@ function nGFetchALot({
             }
             catch
             {
-                throw new Error(`Invalid URL in queue item ${index}: ${urlToValidate}`);
+                throw new TypeError(`Invalid URL in queue item ${index}: ${urlToValidate}`);
             }
 
             return {
@@ -101,28 +93,52 @@ function nGFetchALot({
     // do the main magic
     const done = (async () =>
     {
-        try
+        // wrap each worker so that no matter *why* it throws, every other
+        // worker is told to stop immediately, before we even finish awaiting
+        async function runWorker(workerID)
         {
-            // create all the workers
-            // and wait for them to be completed
-            await Promise.all(
-                Array.from(
-                    {
-                        length: MAX_CONCURRENT_WORKERS
-                    },
-                    (_, index) => worker(`worker${index + 1}`)
-                )
-            );
-
-            onQueueDone();
+            try
+            {
+                await worker(workerID);
+            }
+            catch(error)
+            {
+                // flip this synchronously, the instant we know about the failure,
+                // so siblings exit on their next loop-top check rather than
+                // running until Promise.allSettled happens to notice
+                isDoneProcessingQueue = true;
+                throw error;
+            }
         }
-        catch(error)
+
+        const results = await Promise.allSettled(
+            Array.from(
+                {
+                    length: MAX_CONCURRENT_WORKERS
+                },
+                (_, index) => runWorker(`worker${index + 1}`)
+            )
+        );
+
+        const rejected = results.filter(r => r.status === "rejected");
+
+        if(rejected.length > 0)
         {
             killSwitchTripped = true;
             isDoneProcessingQueue = true;
 
-            throw error; // rethrow the error so the user can catch it if they want
+            // surface the first failure to the caller; log any others so they
+            // aren't silently lost (multiple rejections should be rare given
+            // the cooldown dedup in handleRetryLogic, but not impossible)
+            for(let i = 1; i < rejected.length; i++)
+            {
+                console.error("additional worker failure (not surfaced via done):", rejected[i].reason);
+            }
+
+            throw rejected[0].reason;
         }
+
+        onQueueDone();
     })();
 
     // return a controller the user can use to stop the queue processing
@@ -160,7 +176,7 @@ function nGFetchALot({
             if(queue.length === 0)
             {
                 // sleep a bit to give another worker time to add to the queue
-                await sleep(100);
+                await sleep(100, 'waiting for other workers to finish');
                 continue;
             }
 
@@ -170,7 +186,7 @@ function nGFetchALot({
             if(baseWaitTime > 0)
             {
                 // add a worker specific jitter so all the workers don't wake at the same time
-                await sleep(baseWaitTime + (Math.random() * 1000));
+                await sleep(baseWaitTime + (Math.random() * 1000), 'cooling down before retrying');
                 continue;
             }
 
@@ -258,7 +274,7 @@ function nGFetchALot({
             const responseParts = parseBatchRequestResponse(responseData, boundary);
 
             // match parsed json respones against the original batch requests
-            for(let i = 0, numBatchRequests = batchRequests.length; i < numBatchRequests; ++i)
+            for(let i = batchRequests.length - 1; i >= 0; i--)
             {
                 const queueItem = batchRequests[i];
                 const itemId = queueItem.id;
@@ -284,7 +300,7 @@ function nGFetchALot({
                                 httpResponseMessage: httpResponseMessage,
                                 responseJSON: responseJSON
                             },
-                            request: queueItem
+                            id: queueItem.id
                         });
 
                         // only push if we haven't hit retry limit
@@ -312,7 +328,7 @@ function nGFetchALot({
                                 httpResponseMessage: httpResponseMessage,
                                 responseJSON: responseJSON
                             },
-                            request: queueItem
+                            id: queueItem.id
                         });
 
                         onItemDone({
@@ -332,7 +348,7 @@ function nGFetchALot({
                             boundary: boundary,
                             responseParts: responseParts
                         },
-                        request: queueItem
+                        id: queueItem.id
                     });
 
                     onItemDone({
@@ -349,7 +365,7 @@ function nGFetchALot({
                 type: "warning",
                 message: `batch request error: ${ret.message}; requeuing requests; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
                 details: ret.details,
-                request: batchRequests
+                id: batchRequests.map(queueItem => queueItem.id)
             });
 
             // we need to reque the batch requests that we can
@@ -380,7 +396,7 @@ function nGFetchALot({
                 type: "error",
                 message: `batch request failure: ${ret.message}; skipping requests`,
                 details: ret.details,
-                request: batchRequests
+                id: batchRequests.map(queueItem => queueItem.id)
             });
 
             for(const queueItem of batchRequests)
@@ -410,7 +426,7 @@ function nGFetchALot({
                 type: "warning",
                 message: `solo request error: ${ret.message}; requeuing request; pausing until ${(new Date(ret.waitUntil)).toLocaleString()} (${Math.max(0, Math.ceil((ret.waitUntil - Date.now()) / 1000))} seconds) (attempt ${ret.failureCount}/${MAX_RETRY_ATTEMPTS_GLOBAL})`,
                 details: ret.details,
-                request: queueItem
+                id: queueItem.id
             });
 
             // only push if we haven't hit retry limit
@@ -434,7 +450,7 @@ function nGFetchALot({
                 type: "error",
                 message: `solo request failure: ${ret.message}; skipping request`,
                 details: ret.details,
-                request: queueItem
+                id: queueItem.id
             });
 
             onItemDone({
@@ -605,7 +621,7 @@ function nGFetchALot({
                     id: queueItem.id,
                     pagesSoFar: queueItem._pages.length
                 },
-                request: queueItem
+                id: queueItem.id
             });
 
             // update the url with the next page token
@@ -832,20 +848,23 @@ function nGFetchALot({
 
         return (...args) =>
         {
-            // no point in calling this function if the kill switch has been tripped because execution has stopped
-            if(!killSwitchTripped)
+            try
             {
                 userFunction(...args);
+            }
+            catch(error)
+            {
+                console.error(`Error in user-provided function '${functionName}':`, error);
             }
         }
     }
 
     // Returns a promise that resolves after a fixed delay.
-    function sleep(ms)
+    function sleep(ms, reason)
     {
         onEvent({
             type: "info",
-            message: `Sleeping for ${ms} milliseconds...`
+            message: `${reason}; sleeping for ${ms} milliseconds...`
         });
         return new Promise(resolve => setTimeout(resolve, ms));
     }
