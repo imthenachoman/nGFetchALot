@@ -261,7 +261,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "batch request error: unknown fetch error; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `error`,
-    id: ["...", "...", ...]
+    id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
 
@@ -270,7 +270,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "warning",
     message: "batch request error: google failure with retrable code; requeuing requests; pausing until [date/time] (XX seconds) (attempt #/#)",
     details: fetch `response`,
-    id: ["...", "...", ...]
+    id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
 
@@ -323,7 +323,7 @@ Every item in `queue` is either a solo request or a batch request.
     type: "error",
     message: "batch request failure: unknown google error; skipping requests",
     details: fetch `response`,
-    id: ["...", "...", ...]
+    id: ["...", "...", ...] // array of the IDs of all the requests in this batch
 }
 ```
 
