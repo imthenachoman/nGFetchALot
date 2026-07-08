@@ -233,6 +233,16 @@ function nGFetchALot({
                     matchingBatchRequests.push(queue.pop());
                 }
                 // --- END ATOMIC ZONE ---
+                
+                // let the user know we're starting
+                matchingBatchRequests.forEach(request =>
+                {
+                    onEvent({
+                        type: "info",
+                        message: "starting",
+                        id: request.id
+                    });
+                });
 
                 // Now it is perfectly safe to await, because the items are completely 
                 // wiped out from the global queue. No other worker can see them.
