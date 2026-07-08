@@ -83,7 +83,10 @@ function nGFetchALot({
             }
 
             return {
-                ...queueItem,
+                id: queueItem.id,
+                ...(queueItem.batchUrl ? {batchUrl: queueItem.batchUrl, apiPath: queueItem.apiPath} : {url: queueItem.url}),
+                ...(queueItem.body !== undefined ? {body: queueItem.body} : {}),
+                ...(queueItem.contentType !== undefined ? {contentType: queueItem.contentType} : {}),
                 _pages: [],
                 _retryCount: 0
             }
@@ -138,7 +141,7 @@ function nGFetchALot({
             throw rejected[0].reason;
         }
 
-        onQueueDone();
+        if(!killSwitchTripped) onQueueDone();
     })();
 
     // return a controller the user can use to stop the queue processing
